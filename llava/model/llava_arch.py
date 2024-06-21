@@ -75,6 +75,19 @@ class LlavaMetaModel:
         self.config.mm_vision_select_layer = mm_vision_select_layer
         self.config.mm_vision_select_feature = mm_vision_select_feature
         self.config.mm_patch_merge_type = mm_patch_merge_type
+        
+        if self.config.mm_projector_type == 'qformer':
+            self.config.num_queries = getattr(model_args, 'num_queries', 256)
+            self.config.num_qformer_attention_heads = getattr(model_args, 'num_qformer_attention_heads', 8)
+            self.config.num_qformer_layers = getattr(model_args, 'num_qformer_layers', 4)
+            self.config.qformer_cross_attention_freq = getattr(model_args, 'qformer_cross_attention_freq', 1)
+        elif 'perceiver' in self.config.mm_projector_type:
+            self.config.resampler_n_latents = getattr(model_args, 'resampler_n_latents', 64)
+            self.config.resampler_depth = getattr(model_args, 'resampler_depth', 3)
+            self.config.resampler_n_heads = getattr(model_args, 'resampler_n_heads', 16)
+            self.config.resampler_head_dim = getattr(model_args, 'resampler_head_dim', 96)
+            if 'text_aware' in self.config.mm_projector_type:
+                self.config.resampler_text_position_embedding = getattr(model_args, 'resampler_text_position_embedding', True)
 
         if getattr(self, 'mm_projector', None) is None:
             self.mm_projector = build_vision_projector(self.config)
@@ -90,6 +103,7 @@ class LlavaMetaModel:
                 p.requires_grad = True
 
         if pretrain_mm_mlp_adapter is not None:
+            print(f"Loading pretrain_mm_mlp_adapter from {pretrain_mm_mlp_adapter}")
             mm_projector_weights = torch.load(pretrain_mm_mlp_adapter, map_location='cpu')
             def get_w(weights, keyword):
                 return {k.split(keyword + '.')[1]: v for k, v in weights.items() if keyword in k}
@@ -139,7 +153,7 @@ class LlavaMetaForCausalLM(ABC):
 
     def encode_images(self, images):
         image_features = self.get_model().get_vision_tower()(images)
-        image_features = self.get_model().mm_projector(image_features)
+        # image_features = self.get_model().mm_projector(image_features)
         return image_features
 
     def prepare_inputs_labels_for_multimodal(
@@ -151,6 +165,7 @@ class LlavaMetaForCausalLM(ABC):
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
         if type(images) is list or images.ndim == 5:
+            raise NotImplementedError
             if type(images) is list:
                 images = [x.unsqueeze(0) if x.ndim == 3 else x for x in images]
             concat_images = torch.cat([image for image in images], dim=0)
@@ -199,7 +214,12 @@ class LlavaMetaForCausalLM(ABC):
             else:
                 raise ValueError(f"Unexpected mm_patch_merge_type: {self.config.mm_patch_merge_type}")
         else:
-            image_features = self.encode_images(images)
+            raw_image_features = self.encode_images(images)
+
+        if self.config.mm_projector_type == 'qformer' or 'text_aware' in self.config.mm_projector_type:
+            pass
+        else:
+            image_features = self.get_model().mm_projector(raw_image_features)
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, 'tune_mm_mlp_adapter', False) and getattr(self.config, 'mm_use_im_start_end', False):
@@ -232,8 +252,17 @@ class LlavaMetaForCausalLM(ABC):
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
             if num_images == 0:
-                cur_image_features = image_features[cur_image_idx]
+                # cur_image_features = image_features[cur_image_idx]
                 cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
+                if self.config.mm_projector_type == 'qformer' or 'text_aware' in self.config.mm_projector_type:
+                    # a dummy tensor
+                    cur_image_features = self.get_model().mm_projector([
+                        raw_image_features[cur_image_idx].unsqueeze(0),
+                        torch.zeros(1, 1, cur_input_embeds_1.shape[-1], device=cur_input_embeds_1.device, dtype=cur_input_embeds_1.dtype)
+                    ])[0]
+                else:
+                    cur_image_features = image_features[cur_image_idx]
+
                 cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
@@ -253,11 +282,58 @@ class LlavaMetaForCausalLM(ABC):
             cur_new_input_embeds = []
             cur_new_labels = []
 
+            if self.config.mm_projector_type == 'qformer' or 'text_aware' in self.config.mm_projector_type:
+                # to make this work for text_aware qformers
+                # we assume that each question starts with an <image> token
+                # this saves us from having to locate where the image tokens
+                # should be inserted among input_embeds
+                # this condition holds as long as in the data json file
+                # each question as an <image> token
+                # then the formatters (`tinyllava/data/template/*`) make sure that
+                # the <image> token is at the beginning of each question
+                # for both the pretrain and finetune stage
+
+                # but still we have to slice the question part from the input_embeds
+                # to feed to the connector
+                cur_input_embeds_no_im_only_question = []
+                assert len(cur_input_embeds_no_im) >= 2
+                # starts from the second, which will be the first after image
+                for i in range(1, len(cur_input_embeds_no_im)):
+                    temp_input_embeds = cur_input_embeds_no_im[i]
+                    assert len(temp_input_embeds) == split_sizes[i]
+                    temp_labels = cur_labels_noim[i]
+                    assert temp_input_embeds.shape[0] == temp_labels.shape[0]
+                    # we only need the question part
+                    cur_input_embeds_no_im_only_question.append(
+                        temp_input_embeds[temp_labels == IGNORE_INDEX].clone()
+                    )
+                assert len(cur_input_embeds_no_im_only_question) == num_images, \
+                    f"len(cur_input_embeds_no_im_only_question)={len(cur_input_embeds_no_im_only_question)} != num_images={num_images}"
+
+                # padding will be handled by the connector
+                image_features = self.get_model().mm_projector([
+                    raw_image_features[cur_image_idx].unsqueeze(0).expand(
+                        len(cur_input_embeds_no_im_only_question), -1, -1
+                    ),
+                    cur_input_embeds_no_im_only_question
+                ])
+            else:
+                pass
+            
+            # here for text-aware qformer, we assume that in the data 
+            # json file, each question starts with an <image> token
             for i in range(num_images + 1):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
                 if i < num_images:
-                    cur_image_features = image_features[cur_image_idx]
+                    if self.config.mm_projector_type == 'qformer' or 'text_aware' in self.config.mm_projector_type:
+                        # for this case `image_features` is local
+                        # indexed by `i`
+                        cur_image_features = image_features[i]
+                    else:
+                        # for this case `image_features` is global
+                        # indexed by `cur_image_idx`
+                        cur_image_features = image_features[cur_image_idx]
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
