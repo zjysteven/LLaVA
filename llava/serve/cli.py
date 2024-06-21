@@ -27,9 +27,13 @@ def load_image(image_file):
 def main(args):
     # Model
     disable_torch_init()
+    dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
 
     model_name = get_model_name_from_path(args.model_path)
-    tokenizer, model, image_processor, context_len = load_pretrained_model(args.model_path, args.model_base, model_name, args.load_8bit, args.load_4bit, device=args.device)
+    tokenizer, model, image_processor, context_len = load_pretrained_model(
+        args.model_path, args.model_base, model_name, args.load_8bit, args.load_4bit, device=args.device,
+        dtype=dtype
+    )
 
     if "llama-2" in model_name.lower():
         conv_mode = "llava_llama_2"
@@ -60,9 +64,9 @@ def main(args):
     # Similar operation in model_worker.py
     image_tensor = process_images([image], image_processor, model.config)
     if type(image_tensor) is list:
-        image_tensor = [image.to(model.device, dtype=torch.float16) for image in image_tensor]
+        image_tensor = [image.to(model.device, dtype=dtype) for image in image_tensor]
     else:
-        image_tensor = image_tensor.to(model.device, dtype=torch.float16)
+        image_tensor = image_tensor.to(model.device, dtype=dtype)
 
     while True:
         try:
@@ -119,6 +123,7 @@ if __name__ == "__main__":
     parser.add_argument("--conv-mode", type=str, default=None)
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--dtype", type=str, default="float16", choices=["float16", "bfloat16"])
     parser.add_argument("--load-8bit", action="store_true")
     parser.add_argument("--load-4bit", action="store_true")
     parser.add_argument("--debug", action="store_true")

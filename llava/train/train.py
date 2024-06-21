@@ -15,12 +15,14 @@
 #    limitations under the License.
 
 import os
+os.environ["WANDB_PROJECT"]= "llava"
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 import json
 import logging
 import pathlib
 from typing import Dict, Optional, Sequence, List
+import yaml
 
 import torch
 
@@ -65,6 +67,16 @@ class ModelArguments:
     mm_patch_merge_type: Optional[str] = field(default='flat')
     mm_vision_select_feature: Optional[str] = field(default="patch")
 
+    num_queries: int = field(default=256) 
+    num_qformer_layers: int = field(default=4)
+    num_qformer_attention_heads: int = field(default=8)
+    qformer_cross_attention_freq: int = field(default=1)
+
+    resampler_n_latents: int = field(default=64)
+    resampler_depth: int = field(default=3)
+    resampler_n_heads: int = field(default=16)
+    resampler_head_dim: int = field(default=96)
+    resampler_text_position_embedding: bool = field(default=True)
 
 @dataclass
 class DataArguments:
@@ -791,6 +803,13 @@ def train(attn_implementation=None):
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    output_dir = getattr(training_args, 'output_dir', None)
+    assert output_dir is not None, "output_dir is required"
+    os.makedirs(output_dir, exist_ok=True)
+    yaml.dump(asdict(model_args), open(f"{output_dir}/arguments_model.yaml", "w"))
+    yaml.dump(asdict(data_args), open(f"{output_dir}/arguments_data.yaml", "w"))
+    yaml.dump(asdict(training_args), open(f"{output_dir}/arguments_training.yaml", "w"))
+
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
