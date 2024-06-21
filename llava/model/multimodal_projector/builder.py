@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import re
 
+from llava.model.multimodal_projector.perceiver import PerceiverResampler
+
 
 class IdentityMap(nn.Module):
     def __init__(self):
@@ -38,6 +40,7 @@ def build_vision_projector(config, delay_load=False, **kwargs):
 
     mlp_gelu_match = re.match(r'^mlp(\d+)x_gelu$', projector_type)
     if mlp_gelu_match:
+        print('Building MLP with GELU')
         mlp_depth = int(mlp_gelu_match.group(1))
         modules = [nn.Linear(config.mm_hidden_size, config.hidden_size)]
         for _ in range(1, mlp_depth):
@@ -47,5 +50,17 @@ def build_vision_projector(config, delay_load=False, **kwargs):
 
     if projector_type == 'identity':
         return IdentityMap()
+
+    if projector_type == 'qformer':
+        print('Building QFormerTextAware')
+        return QFormerTextAware(config)
+    
+    if projector_type == 'perceiver':
+        print('Building Perceiver')
+        return PerceiverResampler(config)
+
+    if projector_type == 'perceiver_text_aware':
+        print('Building PerceiverTextAware')
+        return PerceiverResamplerTextAware(config)
 
     raise ValueError(f'Unknown projector type: {projector_type}')
