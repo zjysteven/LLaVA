@@ -1,0 +1,4 @@
+[submodule "lmms-eval"]
+	path = lmms-eval
+	url = git@github.com:zjysteven/lmms-eval.git
+	branch = local
